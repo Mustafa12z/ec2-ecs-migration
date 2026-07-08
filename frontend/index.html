@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Legacy API Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">L</div>
+      <div>
+        <h1>Legacy API Console</h1>
+        <p class="subtitle">Flask &middot; Gunicorn &middot; Nginx on EC2</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <div id="healthBadge" class="badge badge--unknown" title="Service health">
+        <span class="dot"></span>
+        <span id="healthText">checking&hellip;</span>
+      </div>
+      <button id="refreshBtn" class="btn btn--ghost" title="Refresh all data">
+        <span class="refresh-icon">&#x21bb;</span> Refresh
+      </button>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- Stats -->
+    <section class="stats" id="stats" aria-label="Statistics">
+      <div class="stat-card">
+        <div class="stat-label">Products</div>
+        <div class="stat-value" id="statProducts">&ndash;</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Orders</div>
+        <div class="stat-value" id="statOrders">&ndash;</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Revenue</div>
+        <div class="stat-value" id="statRevenue">&ndash;</div>
+      </div>
+      <div class="stat-card stat-card--muted">
+        <div class="stat-label">Last updated</div>
+        <div class="stat-value stat-value--sm" id="statUpdated">&ndash;</div>
+      </div>
+    </section>
+
+    <div class="grid">
+      <!-- Products -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Products</h2>
+          <span class="pill" id="productsCount">0</span>
+        </div>
+        <div id="productsList" class="cards">
+          <div class="empty">Loading products&hellip;</div>
+        </div>
+      </section>
+
+      <!-- Orders -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Orders</h2>
+          <span class="pill" id="ordersCount">0</span>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Product</th>
+                <th class="num">Qty</th>
+                <th class="num">Total</th>
+                <th>Created</th>
+              </tr>
+            </thead>
+            <tbody id="ordersBody">
+              <tr><td colspan="5" class="empty">No orders yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <footer class="footer">
+    <span>API base: <code id="apiBaseLabel"></code></span>
+    <button id="configBtn" class="btn btn--link">Change</button>
+  </footer>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

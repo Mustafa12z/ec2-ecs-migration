@@ -1,0 +1,479 @@
+name: CI/CD
+
+on:
+  pull_request:
+    paths:
+      - "app/**"
+      - "frontend/**"
+      - "terraform/**"
+      - "appspec.yaml"
+      - ".github/workflows/ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "frontend/**"
+      - "appspec.yaml"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+    inputs:
+      push_to_ecr:
+        description: "Push built & scanned images to ECR"
+        type: boolean
+        default: false
+      deploy:
+        description: "Also run migrations + CodeDeploy blue/green deploy (implies push_to_ecr)"
+        type: boolean
+        default: false
+
+# Cancel superseded runs on the same ref (saves minutes, avoids racing deploys).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege by default; jobs elevate only what they need.
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: eu-west-2
+  ECR_API_REPO: legacy-api/api
+  ECR_FRONTEND_REPO: legacy-api/frontend
+  ECS_CLUSTER: legacy-api-cluster
+  ECS_SERVICE: legacy-api-svc
+  TASK_FAMILY: legacy-api
+  CONTAINER_API: api
+  CONTAINER_FRONTEND: frontend
+  CODEDEPLOY_APP: legacy-api-ecs
+  CODEDEPLOY_GROUP: legacy-api-dg
+  # Fail the build on fixable vulnerabilities of this severity or higher.
+  TRIVY_SEVERITY: "HIGH,CRITICAL"
+
+jobs:
+  # Resolves whether this run should push images / deploy, so the same
+  # pipeline can be exercised end-to-end via manual dispatch (e.g. from a
+  # feature branch) without needing to merge to main first.
+  setup:
+    name: Resolve pipeline flags
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      push: ${{ steps.flags.outputs.push }}
+      deploy: ${{ steps.flags.outputs.deploy }}
+    steps:
+      - name: Compute push/deploy flags
+        id: flags
+        env:
+          IS_MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          IS_DISPATCH: ${{ github.event_name == 'workflow_dispatch' }}
+          INPUT_PUSH: ${{ inputs.push_to_ecr }}
+          INPUT_DEPLOY: ${{ inputs.deploy }}
+        run: |
+          push=false
+          deploy=false
+
+          if [ "$IS_MAIN_PUSH" = "true" ]; then
+            push=true
+            deploy=true
+          fi
+
+          if [ "$IS_DISPATCH" = "true" ]; then
+            [ "$INPUT_PUSH" = "true" ] && push=true
+            [ "$INPUT_DEPLOY" = "true" ] && push=true && deploy=true
+          fi
+
+          echo "push=$push" >> "$GITHUB_OUTPUT"
+          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
+          echo "Resolved: push=$push deploy=$deploy (event=${{ github.event_name }}, ref=${{ github.ref }})"
+
+  lint:
+    name: Lint (python + dockerfiles)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: app/requirements.txt
+
+      - name: Ruff (lint)
+        run: |
+          pip install ruff
+          ruff check app
+
+      - name: Hadolint (API Dockerfile)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: app/Dockerfile
+
+      - name: Hadolint (frontend Dockerfile)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: frontend/Dockerfile
+
+  test:
+    name: Test + migrations (real Postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: appuser
+          POSTGRES_PASSWORD: testpw
+          POSTGRES_DB: legacyapi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U appuser -d legacyapi"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_USER: appuser
+      DB_PASSWORD: testpw
+      DB_NAME: legacyapi
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: app/requirements.txt
+
+      - name: Install dependencies
+        working-directory: app
+        run: pip install -r requirements.txt
+
+      - name: Apply migrations
+        working-directory: app
+        run: alembic upgrade head
+
+      - name: Seed baseline data
+        working-directory: app
+        run: flask --app app seed
+
+      - name: Smoke test the app factory
+        working-directory: app
+        run: |
+          python - <<'PY'
+          from app import create_app
+          c = create_app().test_client()
+          assert c.get("/health").status_code == 200, "health failed"
+          assert c.get("/api/v1/products").json["count"] == 3, "seed missing"
+          r = c.post("/api/v1/orders", json={"product_id": 1, "quantity": 2})
+          assert r.status_code == 201, r.data
+          assert c.post("/api/v1/orders", json={"product_id": 1, "quantity": 10**9}).status_code == 400
+          print("smoke ok")
+          PY
+
+  iac-scan:
+    name: IaC misconfig scan (Trivy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy config scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: sarif
+          output: trivy-iac.sarif
+          severity: ${{ env.TRIVY_SEVERITY }}
+
+      - name: Upload IaC results to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-iac.sarif
+          category: trivy-iac
+
+  build-scan-push:
+    name: Build, scan & push (${{ matrix.component }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [setup, lint, test]
+    permissions:
+      contents: read
+      id-token: write        # OIDC -> AWS + cosign keyless signing
+      security-events: write # upload Trivy SARIF
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: api
+            context: app
+            dockerfile: app/Dockerfile
+            repo_env: ECR_API_REPO
+          - component: frontend
+            context: frontend
+            dockerfile: frontend/Dockerfile
+            repo_env: ECR_FRONTEND_REPO
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Build once, load into the local docker so Trivy scans the exact bits
+      # that will be pushed. Layer cache lives in the GitHub Actions cache.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          load: true
+          tags: local/${{ matrix.component }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+      - name: Trivy image scan (report -> code scanning)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: local/${{ matrix.component }}:${{ github.sha }}
+          format: sarif
+          output: trivy-${{ matrix.component }}.sarif
+          ignore-unfixed: true
+          vuln-type: os,library
+
+      - name: Upload image scan to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-${{ matrix.component }}.sarif
+          category: trivy-image-${{ matrix.component }}
+
+      - name: Trivy gate (fail on ${{ env.TRIVY_SEVERITY }})
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: local/${{ matrix.component }}:${{ github.sha }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: ${{ env.TRIVY_SEVERITY }}
+
+      # Everything below only runs when pushing is enabled (main branch push,
+      # or a manual dispatch with push_to_ecr/deploy checked).
+      - name: Configure AWS credentials (OIDC)
+        if: needs.setup.outputs.push == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        if: needs.setup.outputs.push == 'true'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Tag & push to ECR
+        if: needs.setup.outputs.push == 'true'
+        id: push
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPO: ${{ env[matrix.repo_env] }}
+          LOCAL: local/${{ matrix.component }}:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker tag "$LOCAL" "$REGISTRY/$REPO:${GITHUB_SHA}"
+          docker tag "$LOCAL" "$REGISTRY/$REPO:latest"
+          docker push "$REGISTRY/$REPO:${GITHUB_SHA}"
+          docker push "$REGISTRY/$REPO:latest"
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$REGISTRY/$REPO:${GITHUB_SHA}")
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SBOM
+        if: needs.setup.outputs.push == 'true'
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.push.outputs.digest }}
+          format: spdx-json
+          artifact-name: sbom-${{ matrix.component }}.spdx.json
+
+      - name: Sign image (cosign keyless)
+        if: needs.setup.outputs.push == 'true'
+        env:
+          COSIGN_YES: "true"
+        run: |
+          curl -sSfL https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 -o /usr/local/bin/cosign
+          chmod +x /usr/local/bin/cosign
+          cosign sign "${{ steps.push.outputs.digest }}"
+
+  migrate:
+    name: Run DB migrations (one-off ECS task)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [setup, build-scan-push]
+    if: needs.setup.outputs.deploy == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Build a single-container "migrate" task definition from the live api
+      # container definition (same execution/task role, secrets, log group),
+      # pointed at the image being deployed, with the entrypoint replaced by
+      # the migrate+seed command. This never touches the running service.
+      - name: Register migration task definition
+        id: register
+        env:
+          NEW_IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_API_REPO }}:${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          aws ecs describe-task-definition \
+            --task-definition "$TASK_FAMILY" \
+            --query taskDefinition > task-definition.json
+
+          EXEC_ROLE=$(jq -r '.executionRoleArn' task-definition.json)
+          TASK_ROLE=$(jq -r '.taskRoleArn' task-definition.json)
+          CPU=$(jq -r '.cpu' task-definition.json)
+          MEMORY=$(jq -r '.memory' task-definition.json)
+
+          jq --arg image "$NEW_IMAGE" '
+            [.containerDefinitions[] | select(.name == "api")]
+            | .[0].image = $image
+            | .[0].command = ["sh", "-c", "alembic upgrade head && flask --app app seed"]
+            | .[0].essential = true
+          ' task-definition.json > migrate-container-defs.json
+
+          jq -n \
+            --arg family "${TASK_FAMILY}-migrate" \
+            --arg execRole "$EXEC_ROLE" \
+            --arg taskRole "$TASK_ROLE" \
+            --arg cpu "$CPU" \
+            --arg memory "$MEMORY" \
+            --slurpfile containers migrate-container-defs.json \
+            '{
+              family: $family,
+              networkMode: "awsvpc",
+              requiresCompatibilities: ["FARGATE"],
+              executionRoleArn: $execRole,
+              taskRoleArn: $taskRole,
+              cpu: $cpu,
+              memory: $memory,
+              runtimePlatform: { operatingSystemFamily: "LINUX", cpuArchitecture: "X86_64" },
+              containerDefinitions: $containers[0]
+            }' > migrate-task-def.json
+
+          REVISION_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://migrate-task-def.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "task_def_arn=$REVISION_ARN" >> "$GITHUB_OUTPUT"
+
+      # Reuse the running service's network config so the migration task can
+      # reach RDS from the same private subnets / security group.
+      - name: Resolve network configuration
+        id: netcfg
+        run: |
+          set -euo pipefail
+          aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query 'services[0].networkConfiguration.awsvpcConfiguration' > netcfg.json
+          SUBNETS=$(jq -c '.subnets' netcfg.json)
+          SGS=$(jq -c '.securityGroups' netcfg.json)
+          echo "subnets=$SUBNETS" >> "$GITHUB_OUTPUT"
+          echo "security_groups=$SGS" >> "$GITHUB_OUTPUT"
+
+      - name: Run migration task and wait for completion
+        env:
+          TASK_DEF_ARN: ${{ steps.register.outputs.task_def_arn }}
+          SUBNETS: ${{ steps.netcfg.outputs.subnets }}
+          SECURITY_GROUPS: ${{ steps.netcfg.outputs.security_groups }}
+        run: |
+          set -euo pipefail
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "$ECS_CLUSTER" \
+            --task-definition "$TASK_DEF_ARN" \
+            --launch-type FARGATE \
+            --network-configuration "{\"awsvpcConfiguration\":{\"subnets\":$SUBNETS,\"securityGroups\":$SECURITY_GROUPS,\"assignPublicIp\":\"DISABLED\"}}" \
+            --query 'tasks[0].taskArn' --output text)
+
+          echo "Started migration task: $TASK_ARN"
+          aws ecs wait tasks-stopped --cluster "$ECS_CLUSTER" --tasks "$TASK_ARN"
+
+          EXIT_CODE=$(aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$TASK_ARN" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+          STOP_REASON=$(aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$TASK_ARN" \
+            --query 'tasks[0].stoppedReason' --output text)
+
+          echo "Migration task exit code: $EXIT_CODE (stop reason: $STOP_REASON)"
+          echo "Logs: CloudWatch log group for the api container, stream prefix 'api'."
+
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "::error::Migration task failed (exit code $EXIT_CODE) — aborting deploy."
+            exit 1
+          fi
+
+  deploy:
+    name: Deploy (CodeDeploy blue/green)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [setup, build-scan-push, migrate]
+    if: needs.setup.outputs.deploy == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Download current task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "$TASK_FAMILY" \
+            --query taskDefinition > task-definition.json
+
+      - name: Render API container image
+        id: render-api
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_API }}
+          image: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_API_REPO }}:${{ github.sha }}
+
+      - name: Render frontend container image
+        id: render-frontend
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ steps.render-api.outputs.task-definition }}
+          container-name: ${{ env.CONTAINER_FRONTEND }}
+          image: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_FRONTEND_REPO }}:${{ github.sha }}
+
+      - name: Deploy (CodeDeploy blue/green)
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-frontend.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          codedeploy-appspec: appspec.yaml
+          codedeploy-application: ${{ env.CODEDEPLOY_APP }}
+          codedeploy-deployment-group: ${{ env.CODEDEPLOY_GROUP }}

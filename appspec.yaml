@@ -1,0 +1,14 @@
+# CodeDeploy AppSpec for ECS blue/green.
+# The GitHub Actions deploy step substitutes <TASK_DEFINITION> with the ARN of
+# the freshly registered task definition.
+version: 0.0
+Resources:
+  - TargetService:
+      Type: AWS::ECS::Service
+      Properties:
+        TaskDefinition: <TASK_DEFINITION>
+        LoadBalancerInfo:
+          # The load-balanced container is nginx (serves the SPA and proxies
+          # /api + /health to the Flask sidecar over localhost).
+          ContainerName: "frontend"
+          ContainerPort: 80

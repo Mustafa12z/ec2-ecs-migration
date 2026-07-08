@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Terraform
+**/.terraform/
+terraform/ec2-app/hashicorp/
+**/*.tfstate
+**/*.tfstate.*
+**/.terraform.lock.hcl
+**/crash.log
+**/crash.*.log
+terraform/app.zip
+terraform/console-output.txt
+
+# Terraform var files often carry environment-specific values; keep only the
+# committed *.example templates.
+**/terraform.tfvars
+**/*.auto.tfvars
+**/backend.hcl
+
+# Secrets / keys - never commit
+*.pem
+*.key
+migration.pem
+.env
+.env.*
+
+# Logs
+*.log
+logs/

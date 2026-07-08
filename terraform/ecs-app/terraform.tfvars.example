@@ -1,0 +1,33 @@
+aws_region   = "eu-west-2"
+project_name = "legacy-api"
+environment  = "production"
+
+# DNS / TLS  ---- REQUIRED ----
+# The app will be served at domain_name; hosted_zone_name must already exist in
+# Route53 (ACM validation + the alias record are created for you).
+domain_name      = "app.example.com"
+hosted_zone_name = "example.com"
+
+# CI/CD OIDC  ---- REQUIRED ----
+github_org  = "your-github-org"
+github_repo = "your-repo-name"
+
+create_github_oidc_provider = true
+
+# Compute
+task_cpu      = 1024
+task_memory   = 2048
+desired_count = 2
+min_capacity  = 2
+max_capacity  = 6
+
+# Database
+db_instance_class      = "db.t3.micro"
+db_multi_az            = false
+db_deletion_protection = false
+
+tags = {
+  Owner       = "devops-team"
+  CostCenter  = "engineering"
+  Application = "legacy-api"
+}

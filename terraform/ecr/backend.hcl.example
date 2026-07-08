@@ -1,0 +1,8 @@
+# Copy to backend.hcl and fill with YOUR existing state bucket, then:
+#   terraform init -backend-config=backend.hcl
+
+bucket       = "ecs-project-bucket"
+key          = "ecr/terraform.tfstate"
+region       = "eu-west-2"
+encrypt      = true
+use_lockfile = true

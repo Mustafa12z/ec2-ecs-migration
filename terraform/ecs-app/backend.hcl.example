@@ -1,0 +1,12 @@
+# Copy to backend.hcl and fill with YOUR existing state bucket details, then:
+#   terraform init -backend-config=backend.hcl
+#
+# S3 native locking (use_lockfile) is used instead of a DynamoDB table.
+# If you prefer a DynamoDB lock table, replace `use_lockfile` with
+# `dynamodb_table = "<your-lock-table>"`.
+
+bucket       = "ecs-project-bucket"
+key          = "ecs-app/terraform.tfstate"
+region       = "eu-west-2"
+encrypt      = true
+use_lockfile = true

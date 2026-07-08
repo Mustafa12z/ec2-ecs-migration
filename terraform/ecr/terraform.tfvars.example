@@ -1,0 +1,8 @@
+aws_region   = "eu-west-2"
+project_name = "legacy-api"
+
+tags = {
+  Owner       = "devops-team"
+  CostCenter  = "engineering"
+  Application = "legacy-api"
+}
