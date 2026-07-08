@@ -160,7 +160,8 @@ resource "aws_iam_role_policy" "github_actions" {
           "ecs:DescribeTaskDefinition",
           "ecs:DescribeServices",
           "ecs:DescribeTasks",
-          "ecs:ListTasks"
+          "ecs:ListTasks",
+          "ecs:RunTask"
         ]
         Resource = "*"
       },
