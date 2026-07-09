@@ -36,10 +36,8 @@ output "codedeploy_deployment_group_name" {
   value       = module.codedeploy.deployment_group_name
 }
 
-output "github_actions_role_arn" {
-  description = "IAM role ARN GitHub Actions assumes via OIDC"
-  value       = module.iam.github_actions_role_arn
-}
+# The GitHub OIDC provider + "legacy-api-github-actions" role are bootstrapped
+# and managed manually via the AWS CLI (see MIGRATION.md), not by this stack.
 
 output "db_endpoint" {
   description = "RDS endpoint"

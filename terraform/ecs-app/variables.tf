@@ -64,23 +64,6 @@ variable "hosted_zone_name" {
   type        = string
 }
 
-# ----------------------------------------------------------------------- CI/CD
-variable "github_org" {
-  description = "GitHub org/user for OIDC trust"
-  type        = string
-}
-
-variable "github_repo" {
-  description = "GitHub repository name for OIDC trust"
-  type        = string
-}
-
-variable "create_github_oidc_provider" {
-  description = "Create the GitHub OIDC provider (false if it already exists)"
-  type        = bool
-  default     = true
-}
-
 # -------------------------------------------------------------------- Images
 variable "frontend_image_tag" {
   description = "Tag of the frontend image to run"

@@ -1,11 +1,7 @@
-data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
-data "aws_region" "current" {}
 
 locals {
-  account_id = data.aws_caller_identity.current.account_id
-  partition  = data.aws_partition.current.partition
-  region     = data.aws_region.current.name
+  partition = data.aws_partition.current.partition
 }
 
 # ------------------------------------------------------------ ECS execution role
@@ -85,104 +81,11 @@ resource "aws_iam_role_policy_attachment" "codedeploy_ecs" {
 }
 
 # ------------------------------------------------------------ GitHub OIDC (CI/CD)
-data "aws_iam_openid_connect_provider" "github" {
-  count = var.create_github_oidc_provider ? 0 : 1
-  url   = "https://token.actions.githubusercontent.com"
-}
-
-resource "aws_iam_openid_connect_provider" "github" {
-  count           = var.create_github_oidc_provider ? 1 : 0
-  url             = "https://token.actions.githubusercontent.com"
-  client_id_list  = ["sts.amazonaws.com"]
-  thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
-  tags            = var.tags
-}
-
-locals {
-  github_oidc_arn = var.create_github_oidc_provider ? aws_iam_openid_connect_provider.github[0].arn : data.aws_iam_openid_connect_provider.github[0].arn
-}
-
-resource "aws_iam_role" "github_actions" {
-  name = "${var.name}-github-actions"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Federated = local.github_oidc_arn }
-      Action    = "sts:AssumeRoleWithWebIdentity"
-      Condition = {
-        StringEquals = {
-          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-        }
-        StringLike = {
-          "token.actions.githubusercontent.com:sub" = "repo:${var.github_org}/${var.github_repo}:*"
-        }
-      }
-    }]
-  })
-
-  tags = var.tags
-}
-
-resource "aws_iam_role_policy" "github_actions" {
-  name = "cicd"
-  role = aws_iam_role.github_actions.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid      = "EcrAuth"
-        Effect   = "Allow"
-        Action   = ["ecr:GetAuthorizationToken"]
-        Resource = "*"
-      },
-      {
-        Sid    = "EcrPush"
-        Effect = "Allow"
-        Action = [
-          "ecr:BatchCheckLayerAvailability",
-          "ecr:CompleteLayerUpload",
-          "ecr:InitiateLayerUpload",
-          "ecr:PutImage",
-          "ecr:UploadLayerPart",
-          "ecr:BatchGetImage",
-          "ecr:GetDownloadUrlForLayer"
-        ]
-        Resource = var.ecr_repository_arns
-      },
-      {
-        Sid    = "EcsDeploy"
-        Effect = "Allow"
-        Action = [
-          "ecs:RegisterTaskDefinition",
-          "ecs:DescribeTaskDefinition",
-          "ecs:DescribeServices",
-          "ecs:DescribeTasks",
-          "ecs:ListTasks",
-          "ecs:RunTask"
-        ]
-        Resource = "*"
-      },
-      {
-        Sid    = "CodeDeploy"
-        Effect = "Allow"
-        Action = [
-          "codedeploy:CreateDeployment",
-          "codedeploy:GetDeployment",
-          "codedeploy:GetDeploymentConfig",
-          "codedeploy:GetApplicationRevision",
-          "codedeploy:RegisterApplicationRevision"
-        ]
-        Resource = "*"
-      },
-      {
-        Sid      = "PassRoles"
-        Effect   = "Allow"
-        Action   = ["iam:PassRole"]
-        Resource = [aws_iam_role.task_execution.arn, aws_iam_role.task.arn]
-      }
-    ]
-  })
-}
+# NOTE: The GitHub OIDC provider and the "legacy-api-github-actions" role are
+# intentionally NOT managed by this module. They were bootstrapped manually
+# via the AWS CLI (see MIGRATION.md) so CI could run before the rest of this
+# stack existed, and are kept out of Terraform state to avoid a chicken-and-egg
+# apply ordering problem. If you want Terraform to own them going forward,
+# re-add the aws_iam_openid_connect_provider / aws_iam_role / aws_iam_role_policy
+# resources here and `terraform import` the existing AWS resources into state
+# rather than letting Terraform try to create duplicates.

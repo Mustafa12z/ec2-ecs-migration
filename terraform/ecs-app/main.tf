@@ -54,12 +54,8 @@ module "rds" {
 module "iam" {
   source = "./modules/iam"
 
-  name                        = local.name
-  db_secret_arn               = module.rds.db_secret_arn
-  ecr_repository_arns         = [data.aws_ecr_repository.frontend.arn, data.aws_ecr_repository.api.arn]
-  github_org                  = var.github_org
-  github_repo                 = var.github_repo
-  create_github_oidc_provider = var.create_github_oidc_provider
+  name          = local.name
+  db_secret_arn = module.rds.db_secret_arn
 }
 
 # ------------------------------------------------------------------------ ALB

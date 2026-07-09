@@ -8,11 +8,9 @@ environment  = "production"
 domain_name      = "app.example.com"
 hosted_zone_name = "example.com"
 
-# CI/CD OIDC  ---- REQUIRED ----
-github_org  = "your-github-org"
-github_repo = "your-repo-name"
-
-create_github_oidc_provider = true
+# CI/CD OIDC ---- The GitHub OIDC provider + "<project_name>-github-actions"
+# role are bootstrapped manually via the AWS CLI (see MIGRATION.md), not by
+# this stack, so there's nothing to configure here.
 
 # Compute
 task_cpu      = 1024
